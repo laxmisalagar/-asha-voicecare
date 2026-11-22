@@ -109,9 +109,27 @@ export default function App() {
 
   /* --- End Authentication State --- */
 
-  /* --- Onboard login: show once, stored in localStorage --- */
-  /* This section was removed - keeping the login integration simple */
-  /* --- End onboard --- */
+  /* --- Routing state: re-render whenever the hash changes --- */
+  const [, setRoute] = React.useState(readRoute());
+
+  React.useEffect(() => {
+    const sync = () => setRoute(readRoute());
+    window.addEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
+    return () => {
+      window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
+    };
+  }, []);
+
+  const navigate = (path) => {
+    if (window.location.hash !== `#${path}`) {
+      window.history.pushState(null, "", `#${path}`);
+    }
+    setRoute(path);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  /* --- End routing state --- */
 
   /* Deep navy sidebar (desktop + large tablet) */
   const current = ROUTES.find((item) => item.path === readRoute()) || ROUTES[0];
@@ -441,12 +459,4 @@ export default function App() {
       <Toaster />
     </div>
   );
-}
-
-function navigate(path) {
-  setRoute(path);
-  if (window.location.hash !== `#${path}`) {
-    window.history.pushState(null, "", `#${path}`);
-  }
-  window.scrollTo({ top: 0, behavior: "smooth" });
 }
