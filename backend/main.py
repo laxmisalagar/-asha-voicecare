@@ -320,19 +320,30 @@ def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
     visit_date = datetime.now().strftime('%Y-%m-%d')
 
     # Visit type (whole-word matching, so "balance" no longer counts as "anc")
-    if re.search(
+    has_pregnancy = re.search(
         r'\b(pregnan\w*|anc|antenatal|trimester|gestation\w*|expecting)\b', low
-    ):
-        visit_type = 'pregnancy'
-    elif re.search(r'\b(newborn|new\s+born|baby|infant|neonate|child)\b', low):
-        visit_type = 'newborn'
-    elif re.search(
-        r'\b(immuni[sz]ation|vaccinat\w*|vaccine|polio|bcg|opv|rota\w*|pcv|pentavalent)\b',
+    )
+    has_newborn_word = re.search(r'\b(newborn|new\s+born|neonate|neonatal)\b', low)
+    has_baby_word = re.search(r'\b(baby|infant|child|toddler)\b', low)
+    has_immunisation = re.search(
+        r'\b(immuni[sz]ation|vaccinat\w*|vaccine|polio|bcg|opv|ipv|rota\w*|pcv|'
+        r'pentavalent|hbv|measles|injection)\b',
         low,
-    ):
+    )
+
+    if has_pregnancy:
+        visit_type = 'pregnancy'
+    elif has_newborn_word:
+        visit_type = 'newborn'
+    elif has_immunisation:
+        # A vaccination visit for a baby is immunisation, not a newborn check
         visit_type = 'immunisation'
+    elif has_baby_word:
+        visit_type = 'newborn'
     else:
         visit_type = 'general'
+
+    is_infant = bool(has_newborn_word or has_baby_word)
 
     record: Dict[str, Any] = {
         "beneficiaryId": beneficiary_id,
@@ -345,11 +356,12 @@ def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
 
     observations: List[str] = []
 
-    # Weight: newborn weight for newborn visits, otherwise noted in observations
+    # Weight: a baby's weight goes in the newborn weight field,
+    # an adult's weight is noted in observations
     weight = find_weight(t)
 
     if weight is not None:
-        if visit_type == 'newborn':
+        if is_infant and visit_type in ('newborn', 'immunisation'):
             record['newbornWeight'] = weight
             record['weightUnit'] = 'kg'
         else:
