@@ -247,6 +247,14 @@ def normalize_transcript(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # "new born", "new-born", "new bone", "new burn" heard instead of "newborn"
+    t = re.sub(
+        r'\bnew[\s-]*(?:born|bone|burn|barn)\b',
+        'newborn',
+        t,
+        flags=re.IGNORECASE,
+    )
+
     # "wait 48" heard instead of "weight 48"
     t = re.sub(
         r'\b(?:wait|weigh|wate)\b(?=\s*(?:is\s*)?\d)',
@@ -323,7 +331,12 @@ def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
     has_pregnancy = re.search(
         r'\b(pregnan\w*|anc|antenatal|trimester|gestation\w*|expecting)\b', low
     )
-    has_newborn_word = re.search(r'\b(newborn|new\s+born|neonate|neonatal)\b', low)
+    has_newborn_word = re.search(
+        r'\b(newborn|neonate|neonatal|birth\s+(?:dose|weight)|born\s+(?:today|yesterday)|'
+        r'just\s+born|delivered)\b'
+        r'|\b(?:[1-9]|1\d|2[0-8]|one|two|three|four|five|six|seven)\s*-?\s*days?\s*-?\s*old\b',
+        low,
+    )
     has_baby_word = re.search(r'\b(baby|infant|child|toddler)\b', low)
     has_immunisation = re.search(
         r'\b(immuni[sz]ation|vaccinat\w*|vaccine|polio|bcg|opv|ipv|rota\w*|pcv|'
