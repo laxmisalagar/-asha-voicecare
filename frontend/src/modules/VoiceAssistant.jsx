@@ -318,6 +318,12 @@ export default function VoiceAssistant({ onNavigate }) {
 
   const recognitionRef = React.useRef(null);
   const finalTranscriptRef = React.useRef("");
+  /* True while the user wants the mic on. Lets onend restart recognition
+     after the browser stops it on its own (silence timeout, session limit). */
+  const shouldListenRef = React.useRef(false);
+  const restartCountRef = React.useRef(0);
+  const lastStartRef = React.useRef(0);
+  const restartTimerRef = React.useRef(0);
   const reviewRef = React.useRef(null);
   const dangerRef = React.useRef(null);
   const successRef = React.useRef(null);
@@ -352,6 +358,13 @@ export default function VoiceAssistant({ onNavigate }) {
       if (!AudioContext) return;
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      /* If the user already stopped while permission was pending, release it. */
+      if (!shouldListenRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       const ctx = new AudioContext();
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
@@ -385,6 +398,8 @@ export default function VoiceAssistant({ onNavigate }) {
 
   React.useEffect(() => {
     return () => {
+      shouldListenRef.current = false;
+      window.clearTimeout(restartTimerRef.current);
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
@@ -413,9 +428,19 @@ export default function VoiceAssistant({ onNavigate }) {
 
     if (!SpeechRecognition) {
       setSttNotice(
-        "Live speech recognition is not available in this browser. Type or paste the notes below — everything else works the same."
+        "Live speech recognition is not available in this browser. Use Chrome or Edge, or type the notes below — everything else works the same."
       );
       return;
+    }
+
+    /* Make sure no previous session is still alive. */
+    window.clearTimeout(restartTimerRef.current);
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch {
+        /* already stopped */
+      }
     }
 
     const recognition = new SpeechRecognition();
@@ -423,50 +448,126 @@ export default function VoiceAssistant({ onNavigate }) {
     recognition.continuous = true;
     recognition.interimResults = true;
 
-    finalTranscriptRef.current = transcript ? `${transcript} ` : "";
+    finalTranscriptRef.current = transcript ? `${transcript.trim()} ` : "";
+    shouldListenRef.current = true;
+    restartCountRef.current = 0;
 
     recognition.onresult = (event) => {
       let finalText = "";
       let interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
-        if (result.isFinal) finalText += result[0].transcript;
+        if (result.isFinal) finalText += `${result[0].transcript} `;
         else interimText += result[0].transcript;
       }
       if (finalText) {
         finalTranscriptRef.current += finalText;
         setTranscript(finalTranscriptRef.current.trim());
+        /* Real speech was heard, so the session is healthy. */
+        restartCountRef.current = 0;
       }
       setInterim(interimText);
     };
 
     recognition.onerror = (event) => {
+      /* "no-speech" and "aborted" are normal pauses. onend restarts listening. */
+      if (event.error === "no-speech" || event.error === "aborted") return;
+
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
+        shouldListenRef.current = false;
+        setSttNotice(
+          "Microphone permission was denied. Allow it in the browser (lock icon in the address bar), or type the notes instead."
+        );
+        setIsRecording(false);
+        stopMeter();
+        return;
+      }
+
+      if (event.error === "network") {
+        shouldListenRef.current = false;
+        setSttNotice(
+          "Speech recognition needs an internet connection (the browser sends audio to its speech service). Check your connection, or type the notes instead."
+        );
+        setIsRecording(false);
+        stopMeter();
+        return;
+      }
+
+      if (event.error === "audio-capture") {
+        shouldListenRef.current = false;
+        setSttNotice(
+          "No microphone was found. Connect one, or type the notes instead."
+        );
+        setIsRecording(false);
+        stopMeter();
+        return;
+      }
+
       setSttNotice(
-        event.error === "not-allowed"
-          ? "Microphone permission was denied. Allow it in the browser, or type the notes instead."
-          : `Speech recognition stopped (${event.error}). You can type the notes instead.`
+        `Speech recognition hiccup (${event.error}). Trying to continue — you can also type the notes.`
       );
-      setIsRecording(false);
-      stopMeter();
     };
 
     recognition.onend = () => {
-      setIsRecording(false);
       setInterim("");
+
+      /* The user did not press stop, so the browser ended the session
+         (silence timeout or session limit). Start listening again. */
+      if (shouldListenRef.current) {
+        const ranFor = Date.now() - lastStartRef.current;
+        restartCountRef.current =
+          ranFor < 1500 ? restartCountRef.current + 1 : 0;
+
+        if (restartCountRef.current > 6) {
+          shouldListenRef.current = false;
+          setIsRecording(false);
+          stopMeter();
+          setSttNotice(
+            "Speech recognition keeps stopping. Check the microphone permission and your internet connection, or type the notes instead."
+          );
+          return;
+        }
+
+        restartTimerRef.current = window.setTimeout(() => {
+          if (!shouldListenRef.current) return;
+          try {
+            lastStartRef.current = Date.now();
+            recognition.start();
+          } catch {
+            /* start() throws if it is already running; safe to ignore */
+          }
+        }, 300);
+        return;
+      }
+
+      setIsRecording(false);
       stopMeter();
     };
 
     recognitionRef.current = recognition;
     setSttNotice(
-      "Browser speech recognition (demo mode). Audio is handled by your browser's speech service, not by this app."
+      "Browser speech recognition (demo mode). It keeps listening until you tap stop. Audio is handled by your browser's speech service, not by this app."
     );
     setElapsed(0);
-    recognition.start();
+    lastStartRef.current = Date.now();
+    try {
+      recognition.start();
+    } catch {
+      /* already started */
+    }
     setIsRecording(true);
-    startMeter();
+    /* Disabled: opening a second microphone stream (getUserMedia) stops
+       speech recognition from receiving audio on Android Chrome and some
+       Windows setups. The bars use the built-in wave animation instead. */
+    // startMeter();
   };
 
   const stopRecording = () => {
+    shouldListenRef.current = false;
+    window.clearTimeout(restartTimerRef.current);
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -486,6 +587,9 @@ export default function VoiceAssistant({ onNavigate }) {
       setAnalysis("error");
       return;
     }
+
+    /* Stop listening before analysing so the transcript is not changing. */
+    if (isRecording) stopRecording();
 
     setAnalysis("loading");
     setError("");
@@ -524,7 +628,7 @@ export default function VoiceAssistant({ onNavigate }) {
       }, 250);
     } catch (err) {
       setError(
-        `${err.message}. Is the backend running at ${API_BASE}? Start it with "python main.py" in the backend folder.`
+        `${err.message}. Is the backend running at ${API_BASE}? If it is hosted on Render's free tier it may be waking up, so wait about a minute and try again.`
       );
       setAnalysis("error");
     }
@@ -721,7 +825,12 @@ export default function VoiceAssistant({ onNavigate }) {
                     <button
                       key={item.code}
                       type="button"
-                      onClick={() => setLanguage(item.code)}
+                      onClick={() => {
+                        /* Changing language mid-recording would keep the old one,
+                           so stop first; the user taps the mic again. */
+                        if (isRecording) stopRecording();
+                        setLanguage(item.code);
+                      }}
                       aria-pressed={active}
                       className={cn(
                         "rounded-full border px-3 py-1.5 text-[12px] font-medium transition-all duration-300",
@@ -818,7 +927,7 @@ export default function VoiceAssistant({ onNavigate }) {
 
               <p className="mt-1 text-[11px] text-white/30">
                 {isRecording
-                  ? "Tap to stop — audio stays with your browser's speech service"
+                  ? "Keeps listening until you tap stop — audio stays with your browser's speech service"
                   : `Tap to speak · ${selectedLanguage.name}`}
               </p>
             </div>
@@ -837,7 +946,13 @@ export default function VoiceAssistant({ onNavigate }) {
               <textarea
                 id="transcript"
                 value={transcript}
-                onChange={(event) => setTranscript(event.target.value)}
+                onChange={(event) => {
+                  setTranscript(event.target.value);
+                  /* Keep the recogniser's running text in sync with manual edits. */
+                  finalTranscriptRef.current = event.target.value
+                    ? `${event.target.value.trim()} `
+                    : "";
+                }}
                 rows={4}
                 placeholder="Example: Newborn visit. Baby weight 2.8 kg. Vaccination completed. Follow up after one month."
                 className="mt-2 min-h-[96px] w-full resize-y bg-transparent text-[13.5px] leading-relaxed text-white/85 outline-none placeholder:text-white/25"
@@ -860,6 +975,7 @@ export default function VoiceAssistant({ onNavigate }) {
                     type="button"
                     onClick={() => {
                       setTranscript(example.text);
+                      finalTranscriptRef.current = `${example.text} `;
                       setAnalysis("idle");
                       setDangerSigns(null);
                       setRecord(null);
@@ -1106,7 +1222,7 @@ export default function VoiceAssistant({ onNavigate }) {
                 },
                 {
                   label: "Transcript text",
-                  value: "localhost:8000 only",
+                  value: "Your backend server only",
                 },
                 {
                   label: "Confirmed records",
