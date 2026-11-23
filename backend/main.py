@@ -227,31 +227,112 @@ def get_danger_sign_alert_python(transcript: str) -> dict:
 
 # --- Entity Extraction Service ---
 
+MONTHS = (
+    r'january|february|march|april|may|june|july|august|september|october|'
+    r'november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec'
+)
+UNIT_RE = r'(?:kilograms?|kilos?|kgs?)'
+
+
+def normalize_transcript(text: str) -> str:
+    """Fix common speech-recognition mishearings before extraction."""
+    t = text.strip()
+
+    # "orc", "ank", "a n c" heard instead of ANC (only before check-up words)
+    t = re.sub(
+        r'\b(?:a\s*\.?\s*n\s*\.?\s*c|orc|ank|ang|ans)\b'
+        r'(?=\s*(?:check|visit|registration|completed|done))',
+        'ANC',
+        t,
+        flags=re.IGNORECASE,
+    )
+
+    # "wait 48" heard instead of "weight 48"
+    t = re.sub(
+        r'\b(?:wait|weigh|wate)\b(?=\s*(?:is\s*)?\d)',
+        'weight',
+        t,
+        flags=re.IGNORECASE,
+    )
+
+    return t
+
+
+def find_weight(text: str) -> Optional[float]:
+    patterns = [
+        rf'(\d+(?:\.\d+)?)\s*{UNIT_RE}\b',
+        r'weight\s*(?:is|was|of)?\s*(\d+(?:\.\d+)?)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            return float(match.group(1))
+
+    return None
+
+
+def find_next_visit(text: str) -> Optional[str]:
+    """Find a next-visit date such as 'December 5' or a gap like 'after one month'."""
+    keyword = re.compile(
+        r'next\s+visit|follow[\s-]?up|\bdue\b|come\s+back|review|visit\s+on',
+        re.IGNORECASE,
+    )
+
+    date_patterns = [
+        rf'\b(?:{MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b',
+        rf'\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:{MONTHS})\b',
+    ]
+
+    for pattern in date_patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            window = text[max(0, match.start() - 40):match.start()]
+
+            if keyword.search(window):
+                return ' '.join(
+                    w.capitalize() if w.isalpha() else w
+                    for w in match.group(0).split()
+                )
+
+    relative_patterns = [
+        r'after\s+(?:\d+|one|two|three|four|six)\s*(?:day|week|month|year)s?',
+        r'next\s+visit\s+(?:after\s+)?(?:\d+|one|two|three|four|six)\s*(?:day|week|month|year)s?',
+        r'one\s+(?:week|month)',
+        r'next\s+(?:week|month)',
+    ]
+
+    for pattern in relative_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            return match.group(0)
+
+    return None
+
+
 def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
     """Extract structured medical entities from voice transcript."""
 
-    t = transcript.strip()
+    t = normalize_transcript(transcript)
+    low = t.lower()
     beneficiary_id = f"ASH-{next(_record_counter)}"
     visit_date = datetime.now().strftime('%Y-%m-%d')
 
-    visit_type_lower = t.lower()
-    visit_type = 'general'
-
-    if any(word in visit_type_lower for word in [
-        'pregnant', 'pregnancy', 'anc', 'antenatal'
-    ]):
+    # Visit type (whole-word matching, so "balance" no longer counts as "anc")
+    if re.search(
+        r'\b(pregnan\w*|anc|antenatal|trimester|gestation\w*|expecting)\b', low
+    ):
         visit_type = 'pregnancy'
-
-    elif any(word in visit_type_lower for word in [
-        'newborn', 'baby', 'infant', 'child'
-    ]):
+    elif re.search(r'\b(newborn|new\s+born|baby|infant|neonate|child)\b', low):
         visit_type = 'newborn'
-
-    elif any(word in visit_type_lower for word in [
-        'immunisation', 'vaccination', 'vaccine',
-        'polio', 'rota', 'pcv'
-    ]):
+    elif re.search(
+        r'\b(immuni[sz]ation|vaccinat\w*|vaccine|polio|bcg|opv|rota\w*|pcv|pentavalent)\b',
+        low,
+    ):
         visit_type = 'immunisation'
+    else:
+        visit_type = 'general'
 
     record: Dict[str, Any] = {
         "beneficiaryId": beneficiary_id,
@@ -262,142 +343,82 @@ def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
         "confirmationStatus": "pending",
     }
 
-    def re_search_weight(text: str) -> Optional[Dict[str, Any]]:
-        patterns = [
-            r'(\d+\.?\d*)\s*kg',
-            r'(\d+\.?\d*)\s*kilo',
-            r'weight\s*(\d+\.?\d*)',
-            r'(\d+\.?\d*)\s*kilos',
-        ]
+    observations: List[str] = []
 
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+    # Weight: newborn weight for newborn visits, otherwise noted in observations
+    weight = find_weight(t)
 
-            if match:
-                return {
-                    'value': float(match.group(1)),
-                    'unit': 'kg'
-                }
-
-        return None
-
-    def re_find_next_visit(text: str) -> Optional[str]:
-        patterns = [
-            r'(after\s+\d+\s*(day|week|month|year))',
-            r'(next\s+visit\s+(after\s+)?\d+\s*(day|week|month|year))',
-            r'(one\s+month)',
-            r'(one\s+week)',
-            r'(after\s+one\s+(month|week))',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-
-            if match:
-                return match.group(0)
-
-        return None
-
-    words = t.lower().split()
+    if weight is not None:
+        if visit_type == 'newborn':
+            record['newbornWeight'] = weight
+            record['weightUnit'] = 'kg'
+        else:
+            observations.append(f"Weight {weight:g} kg")
 
     # Vaccination
-    for i, word in enumerate(words):
+    vaccine_match = re.search(
+        r'\b(bcg|opv|ipv|polio|rotavirus|rota|pcv|hbv|hepatitis|pentavalent|measles|tetanus|tt)\b',
+        low,
+    )
+    vaccine_context = vaccine_match or re.search(
+        r'\b(vaccinat\w*|vaccine|immuni[sz]\w*|injection)\b', low
+    )
 
-        if word in ['vaccination', 'vaccine']:
-            if any(
-                w in ['completed', 'done', 'given', 'received']
-                for w in words[i+1:i+3]
-            ):
-                record['vaccinationStatus'] = 'completed'
+    if vaccine_match:
+        name = vaccine_match.group(1)
+        record['vaccineName'] = name.upper() if len(name) <= 4 else name.capitalize()
 
-        if word in ['ifa', 'iron']:
-            record['observations'] = (
-                record.get('observations') + ' IFA supplement '
-                if record.get('observations')
-                else 'IFA supplement '
-            )
-
-        if word in ['polio', 'rotavirus', 'pcv', 'hbv']:
-            record['vaccineName'] = word.capitalize()
-
-    # Newborn
-    if visit_type == 'newborn':
-
-        weight_match = re_search_weight(t)
-
-        if weight_match:
-            record['newbornWeight'] = weight_match['value']
-            record['weightUnit'] = weight_match['unit'] or 'kg'
-
-        if any(w in t.lower() for w in ['completed', 'done', 'given']):
+    if vaccine_context:
+        if re.search(r'\b(completed|complete|done|given|received|taken)\b', low):
             record['vaccinationStatus'] = 'completed'
-
-        if any(w in t.lower() for w in ['pending', 'pending']):
+        elif re.search(r'\b(pending|due|not\s+given|missed)\b', low):
             record['vaccinationStatus'] = 'pending'
+
+    # Iron / calcium supplements
+    if re.search(r'\b(ifa|iron|folic)\b', low):
+        given = re.search(r'\b(given|gave|provided|distributed|taken|prescribed)\b', low)
+        observations.append('IFA tablets given' if given else 'IFA supplement')
+
+    if re.search(r'\bcalcium\b', low):
+        observations.append('Calcium supplement')
 
     # Pregnancy
     if visit_type == 'pregnancy':
+        if re.search(r'\b(anc|antenatal)\b', low):
+            done = re.search(r'\b(completed|complete|done)\b', low)
+            record['pregnancyStatus'] = 'ANC checkup done' if done else 'ANC visit'
+        elif re.search(r'\bpregnan\w*', low):
+            record['pregnancyStatus'] = 'Pregnant'
 
-        if 'anc' in t.lower() or 'antenatal' in t.lower():
-            record['pregnancyStatus'] = 'ANC checkup done'
-
-        if 'ifa' in t.lower() or 'iron' in t.lower():
-            record['observations'] = (
-                record.get('observations') + ' IFA prescribed '
-                if record.get('observations')
-                else 'IFA prescribed '
-            )
-
-    # Immunisation
-    if visit_type == 'immunisation':
-
-        vaccine_keywords = [
-            'polio', 'bcg', 'hepatitis',
-            'rotavirus', 'pcv', 'pentavalent'
-        ]
-
-        for kw in vaccine_keywords:
-            if kw in t.lower():
-                record['vaccineName'] = kw.capitalize()
-                break
-
-        date_patterns = re.findall(
-            r'\d{1,2}\s*(day|week|month|year)',
-            t,
-            re.IGNORECASE
+        ga = (
+            re.search(r'pregnan\w*\s+(?:woman\s+|lady\s+|mother\s+)?(?:at\s+)?(\d{1,2})\s*weeks?', low)
+            or re.search(r'(\d{1,2})\s*weeks?\s*(?:pregnan\w*|gestation\w*)', low)
+            or re.search(r'gestation\w*\s*(?:age\s*)?(?:of\s*)?(\d{1,2})\s*weeks?', low)
         )
 
-        if date_patterns:
-            record['nextDueDate'] = date_patterns[0]
+        if ga:
+            record['gestationalAge'] = f"{ga.group(1)} weeks"
 
-    # Observations
-    observation_keywords = [
-        'oedema', 'hypertension', 'anemia',
-        'diabetes', 'complications'
-    ]
+    # Clinical observations
+    for obs in [
+        'oedema', 'edema', 'hypertension', 'anemia', 'anaemia',
+        'diabetes', 'complications',
+    ]:
+        if re.search(rf'\b{obs}\b', low):
+            observations.append(obs.capitalize())
 
-    for obs in observation_keywords:
-
-        if obs in t.lower():
-
-            if record.get('observations'):
-                record['observations'] = (
-                    record['observations'] + f', {obs} '
-                )
-            else:
-                record['observations'] = obs
+    if observations:
+        record['observations'] = ', '.join(dict.fromkeys(observations))
 
     # Follow-up actions
-    if any(w in t.lower() for w in [
-        'follow-up', 'followup', 'follow up'
-    ]):
+    if re.search(r'follow[\s-]?up', low):
         record['followUpActions'] = 'Follow-up visit required'
 
     # Next visit
-    next_visit_patterns = re_find_next_visit(t)
+    next_visit = find_next_visit(t)
 
-    if next_visit_patterns:
-        record['nextDueDate'] = next_visit_patterns
+    if next_visit:
+        record['nextDueDate'] = next_visit
 
     return record
 
