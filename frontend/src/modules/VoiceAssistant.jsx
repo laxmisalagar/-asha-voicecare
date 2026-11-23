@@ -302,6 +302,7 @@ export default function VoiceAssistant({ onNavigate }) {
     }
   });
   const [beneficiaryId, setBeneficiaryId] = React.useState("");
+  const [visitHint, setVisitHint] = React.useState("auto");
   const [transcript, setTranscript] = React.useState("");
   const [interim, setInterim] = React.useState("");
   const [isRecording, setIsRecording] = React.useState(false);
@@ -602,9 +603,13 @@ export default function VoiceAssistant({ onNavigate }) {
         api.dangerSigns(text, language),
         api.extractEntities(text, language, beneficiaryId.trim()),
       ]);
+      /* A visit type chosen by hand wins over the detected one, because
+         speech recognition can mishear keywords like "newborn". */
+      const finalRecord =
+        visitHint !== "auto" ? { ...extracted, visitType: visitHint } : extracted;
       setDangerSigns(signs);
-      setRecord(extracted);
-      setReadBack(buildReadBack(extracted));
+      setRecord(finalRecord);
+      setReadBack(buildReadBack(finalRecord));
       setAnalysis("done");
 
       const detected = signs?.detected_signs || [];
@@ -840,6 +845,44 @@ export default function VoiceAssistant({ onNavigate }) {
                       )}
                     >
                       {item.native}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Visit type */}
+            <div className="mt-5">
+              <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40">
+                <ClipboardList className="h-3.5 w-3.5" />
+                Visit type
+                <span className="font-medium normal-case tracking-normal text-white/25">
+                  (optional)
+                </span>
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {[
+                  { value: "auto", label: "Auto-detect" },
+                  { value: "pregnancy", label: "Pregnancy" },
+                  { value: "newborn", label: "Newborn" },
+                  { value: "immunisation", label: "Immunisation" },
+                  { value: "general", label: "General" },
+                ].map((item) => {
+                  const active = visitHint === item.value;
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() => setVisitHint(item.value)}
+                      aria-pressed={active}
+                      className={cn(
+                        "rounded-full border px-3 py-1.5 text-[12px] font-medium transition-all duration-300",
+                        active
+                          ? "border-violet-400/40 bg-violet-500/15 text-violet-200"
+                          : "border-white/10 bg-white/[0.03] text-white/55 hover:border-white/20 hover:text-white"
+                      )}
+                    >
+                      {item.label}
                     </button>
                   );
                 })}

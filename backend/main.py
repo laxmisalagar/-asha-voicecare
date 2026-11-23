@@ -344,9 +344,20 @@ def extract_entities(transcript: str, language: str = 'en') -> Dict[str, Any]:
         low,
     )
 
+    # Words that point to newborn care even if "newborn" was misheard
+    has_newborn_care = re.search(
+        r'\b(feeding|breast\s*-?\s*feed\w*|breastfe\w*|cord|navel|umbilical|jaundice|kangaroo)\b',
+        low,
+    )
+    explicit_immunisation = re.search(r'\bimmuni[sz]ation\b', low)
+
     if has_pregnancy:
         visit_type = 'pregnancy'
     elif has_newborn_word:
+        visit_type = 'newborn'
+    elif explicit_immunisation:
+        visit_type = 'immunisation'
+    elif has_baby_word and has_newborn_care:
         visit_type = 'newborn'
     elif has_immunisation:
         # A vaccination visit for a baby is immunisation, not a newborn check
